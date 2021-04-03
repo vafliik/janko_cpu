@@ -25,8 +25,6 @@ Version = "1.7 $Id$"
 import sys, getopt, time
 from datetime import datetime, timedelta
 
-# File containing results from previous measurements
-file_path = 'tmp/SalsitaCustomNCPANagiosChecks/results.json'
 
 # nagios return codes
 UNKNOWN = 3
@@ -35,16 +33,17 @@ WARNING = 1
 CRITICAL = 2
 
 # Usage message
-usage = """usage: ./check_cpu.py [-w num|--warn=num] [-c|--crit=num]
+usage = """usage: ./check_cpu.py [-w num|--warn=num] [-c|--crit=num] [-t|--time=num] [-f|--file=str]
 	-w, --warn     ... generate warning  if total cpu exceeds num (default: 95)
 	-c, --crit     ... generate critical if total cpu exceeds num (default: 98)
-	-v  --version  ... print(version
+	-t, --time     ... analyze results from previous (num) minutes (default: 10)
+	-f, --file     ... previous measurements filename (default: '/tmp/SalsitaCustomNCPANagiosChecks/results.json')
+	-v  --version  ... print(version)
 
 Notes:
 	Warning/critical alerts are generated when the threshold is exceeded
 	eg -w 95 means alert on 96% and above
 	All values are in percent, but no % symbol is required
-	'total' includes io_wait and steal (ie. everything except idle)
 """
 
 cpu_percent = {}
@@ -59,6 +58,10 @@ crit = 98
 proc_stat_file = '/proc/stat'
 sample_period = 1
 perfdata_abs = 1
+time_window_minutes = 10
+
+# File containing results from previous measurements
+file_path = '/tmp/SalsitaCustomNCPANagiosChecks/results.json'
 
 # Generate actual timestamp
 now = datetime.now()
@@ -67,7 +70,7 @@ timestamp = datetime.timestamp(now)
 
 def read_historical_results():
     # 10 minutes ago
-    ts_past = datetime.timestamp(now - timedelta(minutes=10))
+    ts_past = datetime.timestamp(now - timedelta(minutes=time_window_minutes))
     # Read the file
     if os.path.exists(file_path):
         with open(file_path, 'r') as f:
@@ -78,7 +81,8 @@ def read_historical_results():
 
     else:
         results = {}
-    print('Last 10 minutes: ', ', '.join('{0:.2f}%'.format(x) for x in results.values()) or '(no data)')
+
+    # print('Last 10 minutes: ', ', '.join('{0:.2f}%'.format(x) for x in results.values()) or '(no data)')
     return results
 
 
@@ -158,7 +162,7 @@ def get_cpu_stats():
 
 # Build the status message (service output message) and set the exit code based on the average value from data
 def check_status(avg):
-    message = 'Average CPU Load in last 10 minutes: {}'.format(avg)
+    message = 'Average CPU Load in last {} minutes: {}'.format(time_window_minutes, avg)
 
     if avg >= crit:
         message = 'CRITICAL - ' + message
@@ -175,12 +179,11 @@ def check_status(avg):
 
 # define command line options and validate data.  Show usage or provide info on required options
 def command_line_validate(argv):
-    global warn, crit, sample_period
-    global proc_stat_file
-    global perfdata_abs
+    global warn, crit, time_window_minutes, file_path
+
     try:
-        opts, args = getopt.getopt(argv, 'w:c:V',
-                                   ['warn=', 'crit=', 'version'])
+        opts, args = getopt.getopt(argv, 'w:c:t:f:V',
+                                   ['warn=', 'crit=', 'time=', 'file=', 'version'])
     except getopt.GetoptError:
         print(usage)
         sys.exit(CRITICAL)
@@ -200,6 +203,18 @@ def command_line_validate(argv):
                 except:
                     print('***crit value must be an integer***')
 
+            elif opt in ('-t', '--time'):
+                try:
+                    time_window_minutes = int(arg)
+                except:
+                    print('***time window value must be an integer***')
+
+            elif opt in ('-f', '--file'):
+                try:
+                    file_path = str(arg)
+                except:
+                    print('***file name value must be a string***')
+
             elif opt in ('-V', '--version'):
                 print(Version)
                 sys.exit(WARNING)
@@ -218,23 +233,22 @@ def command_line_validate(argv):
 # main function
 def main():
     argv = sys.argv[1:]
-    # set crit, warn
     command_line_validate(argv)
 
     # Read the stats from /proc/stat - results are in cpu_percent[] and io_wait_percent[]
     get_cpu_stats()
 
+    # Read results from previous time period (default 10 minutes)
     results = read_historical_results()
 
+    # Get actual usage
     total_cpu = cpu_percent['cpu']
-
-    print('Actual CPU: ', '{0:.2f}%'.format(total_cpu))
-
     results[timestamp] = total_cpu
 
+    # Save current results (current measurement + data from past period)
     write_results_to_file(results)
 
-    # compute the average
+    # Compute the average
     avg = sum(results.values()) / len(results)
 
     # Build the status message (service output message) and set the exit code
