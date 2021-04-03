@@ -1,4 +1,4 @@
-#! /usr/bin/python
+#! /usr/bin/python3
 ############################################################################
 # Copyright 2013 George Hansper                                            #
 # This program has been made available to the Open Source community for    #
@@ -19,7 +19,7 @@
 import json
 import os
 
-Version = "1.7 $Id$"
+Version = "1.0"
 
 # import modules
 import sys, getopt, time
