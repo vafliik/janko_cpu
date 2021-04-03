@@ -25,6 +25,9 @@ Version = "1.7 $Id$"
 import sys, getopt, time
 from datetime import datetime, timedelta
 
+# File containing results from previous measurements
+file_path = 'tmp/SalsitaCustomNCPANagiosChecks/results.json'
+
 # nagios return codes
 UNKNOWN = 3
 OK = 0
@@ -32,56 +35,65 @@ WARNING = 1
 CRITICAL = 2
 
 # Usage message
-usage = """usage: ./check_cpu.py [-w num|--warn=num] [-c|--crit=num] [-W num |--io-warn=num] [-C num|--io-crit=num] [-p num|--period=num]
+usage = """usage: ./check_cpu.py [-w num|--warn=num] [-c|--crit=num]
 	-w, --warn     ... generate warning  if total cpu exceeds num (default: 95)
 	-c, --crit     ... generate critical if total cpu exceeds num (default: 98)
-	-W, --warn-any ... generate warning  if any single cpu exceeds num (default: 98)
-	-C, --crit-any ... generate critical if any single cpu exceeds num (default: 100 (off))
-	-i, --io-warn  ... generate warning  if any single cpu exceeds num in io_wait (default: 90)
-	-I, --io-crit  ... generate critical if any single cpu exceeds num in io_wait (default: 98)
-	    --io-warn-overall ... generate warning  if overall cpu exceeds num in io_wait (default: 100 (off))
-	    --io-crit-overall ... generate critical if overall cpu exceeds num in io_wait (default: 100 (off))
-	-s, --steal-warn  ... generate warning  if any single cpu exceeds num in steal (default: 30)
-	-S, --steal-crit  ... generate critical if any single cpu exceeds num in steal (default: 80)
-	-p, --period   ... sample cpu usage over num seconds
-	-a, --abs      ... generate performance stats in cpu-ticks (jiffies), as well as percent
-	-A, --abs-only ... generate performance stats in cpu-ticks (jiffies), instead of percent
 	-v  --version  ... print(version
 
 Notes:
 	Warning/critical alerts are generated when the threshold is exceeded
 	eg -w 95 means alert on 96% and above
 	All values are in percent, but no % symbol is required
-	A warning/critical will also be generated if any single cpu exceeds a threshold. Specify 100 to disable. eg.
-	     check_cpu.py -W 100 -C 100 
 	'total' includes io_wait and steal (ie. everything except idle)
 """
 
-cpu_percent = dict()
-io_wait_percent = dict()
-steal_percent = dict()
+cpu_percent = {}
+io_wait_percent = {}
+steal_percent = {}
 cpu_id_list = []
 ctxt_per_second = 0
 processes_per_second = 0
-cpu_stats_t1 = dict()
+cpu_stats_t1 = {}
 warn = 95
 crit = 98
-per_cpu_warn = 98
-per_cpu_crit = 100  # Don't generate critical for a single CPU
-io_warn = 90
-io_crit = 98
-io_warn_overall = 100
-io_crit_overall = 100
-steal_warn = 30
-steal_crit = 80
 proc_stat_file = '/proc/stat'
 sample_period = 1
 perfdata_abs = 1
 
+# Generate actual timestamp
+now = datetime.now()
+timestamp = datetime.timestamp(now)
+
+
+def read_historical_results():
+    # 10 minutes ago
+    ts_past = datetime.timestamp(now - timedelta(minutes=10))
+    # Read the file
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            results = json.load(f)
+
+        # Cleanup - remove older than 10 minutes
+        results = {key: val for key, val in results.items() if float(key) >= ts_past}
+
+    else:
+        results = {}
+    print('Last 10 minutes: ', ', '.join('{0:.2f}%'.format(x) for x in results.values()) or '(no data)')
+    return results
+
+
+def write_results_to_file(results):
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    except OSError as e:
+        print("Can't create tmp dir\n" + str(e))
+        sys.exit(CRITICAL)
+    with open(file_path, 'w') as f:
+        json.dump(results, f)
+
 
 def get_procstat_now():
-    global cpu_id_list
-    global proc_stat_file
+    global cpu_id_list, proc_stat_file
     cpu_id_list = []
     cpu_stats = dict()
     procstat = open(proc_stat_file, 'r')
@@ -144,110 +156,34 @@ def get_cpu_stats():
     return
 
 
-# Build the performance data message
-# See: https://nagios-plugins.org/doc/guidelines.html#AEN200
-def performance_data():
-    global warn, crit, io_warn, io_crit, cpu_id_list, cpu_percent, io_wait_percent, steal_percent, ctxt_per_second, processes_per_second
-    perf_message_array = []
-    if (perfdata_abs & 1) == 1:
-        for cpu_id in cpu_id_list:
-            if cpu_id == 'cpu':
-                perf_message_array.append(
-                    cpu_id + '=' + str(cpu_percent[cpu_id]) + '%;' + str(warn) + ';' + str(crit) + ';0;')
-                perf_message_array.append(
-                    cpu_id + '_iowait=' + str(io_wait_percent[cpu_id]) + '%;' + str(io_warn_overall) + ';' + str(
-                        io_crit_overall) + ';0;')
-                perf_message_array.append(cpu_id + '_steal=' + str(steal_percent[cpu_id]) + '%;;;0;')
-            else:
-                perf_message_array.append(
-                    cpu_id + '=' + str(cpu_percent[cpu_id]) + '%;' + str(per_cpu_warn) + ';' + str(
-                        per_cpu_crit) + ';0;')
-                perf_message_array.append(
-                    cpu_id + '_iowait=' + str(io_wait_percent[cpu_id]) + '%;' + str(io_warn) + ';' + str(
-                        io_crit) + ';0;')
-                perf_message_array.append(
-                    cpu_id + '_steal=' + str(steal_percent[cpu_id]) + '%;' + str(steal_warn) + ';' + str(
-                        steal_crit) + ';0;')
-    if (perfdata_abs & 2) == 2:
-        for cpu_id in cpu_id_list:
-            perf_message_array.append(cpu_id + '.all=' + str(cpu_stats_t1[cpu_id + 'all']) + 'c')
-            perf_message_array.append(cpu_id + '.busy=' + str(cpu_stats_t1[cpu_id]) + 'c')
-            perf_message_array.append(cpu_id + '.iowait=' + str(cpu_stats_t1[cpu_id + 'io_wait']) + 'c')
-            perf_message_array.append(cpu_id + '.steal=' + str(cpu_stats_t1[cpu_id + 'steal']) + 'c')
-        perf_message_array.append('ctxt=' + str(cpu_stats_t1['ctxt']) + 'c')
-        perf_message_array.append('procs=' + str(cpu_stats_t1['processes']) + 'c')
-    return " ".join(perf_message_array)
+# Build the status message (service output message) and set the exit code based on the average value from data
+def check_status(avg):
+    message = 'Average CPU Load in last 10 minutes: {}'.format(avg)
 
-
-# Build the status message (service output message) and set the exit code
-def check_status():
-    global warn, crit, io_warn, io_crit, per_cpu_warn, per_cpu_crit, cpu_id_list, cpu_percent, io_wait_percent, steal_percent
-    result = 0
-    message = ''
-    for cpu_id in cpu_id_list:
-        if cpu_id == 'cpu':
-            if cpu_percent[cpu_id] > crit:
-                result |= 2
-                message = 'Total=' + str(cpu_percent[cpu_id]) + '% > ' + str(crit)
-            elif cpu_percent[cpu_id] > warn:
-                result |= 1
-                message = 'Total=' + str(cpu_percent[cpu_id]) + '% > ' + str(warn)
-            else:
-                message = 'Total=' + str(cpu_percent[cpu_id]) + '%'
-            if io_wait_percent[cpu_id] > io_crit_overall:
-                result |= 2
-                message += ' IOwait=' + str(io_wait_percent[cpu_id]) + '% > ' + str(io_crit_overall)
-            elif io_wait_percent[cpu_id] > io_warn_overall:
-                result |= 1
-                message += ' IOwait=' + str(io_wait_percent[cpu_id]) + '% > ' + str(io_warn_overall)
-            else:
-                message += ' IOwait=' + str(io_wait_percent[cpu_id]) + '%'
-            message += ' Steal=' + str(steal_percent[cpu_id]) + '%'
-        else:
-            if cpu_percent[cpu_id] > per_cpu_crit:
-                result |= 2
-                message += ' CRIT: ' + cpu_id + '=' + str(cpu_percent[cpu_id]) + '% > ' + str(per_cpu_crit)
-            elif cpu_percent[cpu_id] > per_cpu_warn:
-                result |= 1
-                message += ' WARN: ' + cpu_id + '=' + str(cpu_percent[cpu_id]) + '% > ' + str(per_cpu_warn)
-            if io_wait_percent[cpu_id] > io_crit:
-                result |= 2
-                message += ' IO_CRIT: ' + cpu_id + '=' + str(io_wait_percent[cpu_id]) + '% > ' + str(io_crit)
-            elif io_wait_percent[cpu_id] > io_warn:
-                result |= 1
-                message += ' IO_WARN: ' + cpu_id + '=' + str(io_wait_percent[cpu_id]) + '% > ' + str(io_warn)
-            if steal_percent[cpu_id] > steal_crit:
-                result |= 2
-                message += ' STEAL_CRIT: ' + cpu_id + '=' + str(steal_percent[cpu_id]) + '% > ' + str(steal_crit)
-            elif steal_percent[cpu_id] > steal_warn:
-                result |= 1
-                message += ' STEAL_WARN: ' + cpu_id + '=' + str(steal_percent[cpu_id]) + '% > ' + str(steal_warn)
-
-    if result == 3 or result == 2:
-        result = 2
-        message = 'CRITICAL: ' + message
-    elif result == 1:
-        message = 'WARNING: ' + message
+    if avg >= crit:
+        message = 'CRITICAL - ' + message
+        status_code = CRITICAL
+    elif avg >= warn:
+        message = 'WARNING - ' + message
+        status_code = WARNING
     else:
-        message = 'OK: ' + message
-    return (result, message)
+        message = 'OK - ' + message
+        status_code = OK
+
+    return status_code, message
 
 
-# define command lnie options and validate data.  Show usage or provide info on required options
+# define command line options and validate data.  Show usage or provide info on required options
 def command_line_validate(argv):
-    global warn, crit, io_warn, io_crit, sample_period
-    global io_warn_overall, io_crit_overall
+    global warn, crit, sample_period
     global proc_stat_file
-    global per_cpu_warn, per_cpu_crit
-    global steal_warn, steal_crit
     global perfdata_abs
     try:
-        opts, args = getopt.getopt(argv, 'w:c:o:W:C:i:I:s:S:p:f:VaA',
-                                   ['warn=', 'crit=', 'warn-any=', 'crit-any=', 'io-warn=', 'io-crit=',
-                                    'io-warn-overall=', 'io-crit-overall=', 'steal-warn=', 'steal-crit=', 'period=',
-                                    'version', '--abs'])
+        opts, args = getopt.getopt(argv, 'w:c:V',
+                                   ['warn=', 'crit=', 'version'])
     except getopt.GetoptError:
         print(usage)
+        sys.exit(CRITICAL)
     try:
         for opt, arg in opts:
             arg = arg.rstrip('%')
@@ -257,64 +193,13 @@ def command_line_validate(argv):
                 except:
                     print('***warn value must be an integer***')
                     sys.exit(CRITICAL)
+
             elif opt in ('-c', '--crit'):
                 try:
                     crit = int(arg)
                 except:
                     print('***crit value must be an integer***')
-            elif opt in ('-W', '--warn-any'):
-                try:
-                    per_cpu_warn = int(arg)
-                except:
-                    print('***warn-any value must be an integer***')
-                    sys.exit(CRITICAL)
-            elif opt in ('-C', '--crit-any'):
-                try:
-                    per_cpu_crit = int(arg)
-                except:
-                    print('***crit-any value must be an integer***')
-            elif opt in ('-i', '--io-warn'):
-                try:
-                    io_warn = int(arg)
-                except:
-                    print('***io-warn value must be an integer***')
-            elif opt in ('-I', '--io-crit'):
-                try:
-                    io_crit = int(arg)
-                except:
-                    print('***io-crit value must be an integer***')
-            elif opt in ('--io-warn-overall'):
-                try:
-                    io_warn_overall = int(arg)
-                except:
-                    print('***io-warn-overall value must be an integer***')
-            elif opt in ('--io-crit-overall'):
-                try:
-                    io_crit_overall = int(arg)
-                except:
-                    print('***io-crit-overall value must be an integer***')
-            elif opt in ('-s', '--steal-warn'):
-                try:
-                    steal_warn = int(arg)
-                except:
-                    print('***steal-warn value must be an integer***')
-            elif opt in ('-S', '--steal-crit'):
-                try:
-                    steal_crit = int(arg)
-                except:
-                    print('***steal-crit value must be an integer***')
-            elif opt in ('-p', '--period'):
-                try:
-                    sample_period = int(arg)
-                except:
-                    print('***period value must be an integer***')
-            elif opt in ('-a', '--abs'):
-                perfdata_abs = 3
-            elif opt in ('-A', '--abs-only'):
-                perfdata_abs = 2
-            elif opt in ('-f'):
-                # Just for testing
-                proc_stat_file = arg
+
             elif opt in ('-V', '--version'):
                 print(Version)
                 sys.exit(WARNING)
@@ -333,32 +218,13 @@ def command_line_validate(argv):
 # main function
 def main():
     argv = sys.argv[1:]
-    # set crit,warn,io_crit,io_warn
+    # set crit, warn
     command_line_validate(argv)
 
     # Read the stats from /proc/stat - results are in cpu_percent[] and io_wait_percent[]
     get_cpu_stats()
 
-    now = datetime.now()
-    timestamp = datetime.timestamp(now)
-
-    # 10 minutes ago
-    ts_past = datetime.timestamp(now - timedelta(minutes=10))
-
-    # Read the file
-    file_path = 'tmp/SalsitaCustomNCPANagiosChecks/results.json'
-
-    if os.path.exists(file_path):
-        with open(file_path, 'r') as f:
-            results = json.load(f)
-
-        # Cleanup - remove older than 10 minutes
-        results = {key: val for key, val in results.items() if float(key) >= ts_past}
-
-    else:
-        results = {}
-
-    print('Last 10 minutes: ', ', '.join('{0:.2f}%'.format(x) for x in results.values()) or '(no data)')
+    results = read_historical_results()
 
     total_cpu = cpu_percent['cpu']
 
@@ -366,34 +232,16 @@ def main():
 
     results[timestamp] = total_cpu
 
-    # Write the file ...
-    try:
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    except OSError as e:
-        print("Can't create tmp dir\n" + str(e))
-        sys.exit(2)
-
-    with open(file_path, 'w') as f:
-        json.dump(results, f)
-
-    avg = sum(results.values()) / len(results)
-    message = 'Average CPU Load in last 10 minutes: {}'.format(avg)
+    write_results_to_file(results)
 
     # compute the average
-    if avg >= crit:
-        print('CRITICAL -', message)
-        sys.exit(2)
-    else:
-        print('OK -', message)
-        sys.exit(0)
-
-    # Build the performance data message
-    # perf_message = performance_data()
+    avg = sum(results.values()) / len(results)
 
     # Build the status message (service output message) and set the exit code
-    # (exit_code, result_message) = check_status()
+    exit_code, result_message = check_status(avg)
 
-    # print(result_message, '|', perf_message)
+    print(result_message)
+    sys.exit(exit_code)
 
 
 if __name__ == '__main__':
