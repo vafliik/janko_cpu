@@ -25,7 +25,6 @@ Version = "1.0"
 import sys, getopt, time
 from datetime import datetime, timedelta
 
-
 # nagios return codes
 UNKNOWN = 3
 OK = 0
@@ -36,7 +35,7 @@ CRITICAL = 2
 usage = """usage: ./check_cpu.py [-w num|--warn=num] [-c|--crit=num] [-t|--time=num] [-f|--file=str]
 	-w, --warn     ... generate warning  if total cpu exceeds num (default: 95)
 	-c, --crit     ... generate critical if total cpu exceeds num (default: 98)
-	-t, --time     ... analyze results from previous (num) minutes (default: 10)
+	-t, --time     ... analyze results from previous (num) seconds (default: 600)
 	-f, --file     ... previous measurements filename (default: '/tmp/SalsitaCustomNCPANagiosChecks/results.json')
 	-v  --version  ... print(version)
 
@@ -58,7 +57,7 @@ crit = 98
 proc_stat_file = '/proc/stat'
 sample_period = 1
 perfdata_abs = 1
-time_window_minutes = 10
+time_window_seconds = 600
 
 # File containing results from previous measurements
 file_path = '/tmp/SalsitaCustomNCPANagiosChecks/results.json'
@@ -70,15 +69,18 @@ timestamp = datetime.timestamp(now)
 
 def read_historical_results():
     # x minutes ago
-    ts_past = datetime.timestamp(now - timedelta(minutes=time_window_minutes))
+    ts_past = datetime.timestamp(now - timedelta(minutes=time_window_seconds))
     # Read the file
     if os.path.exists(file_path):
-        with open(file_path, 'r') as f:
-            results = json.load(f)
+        try:
+            with open(file_path, 'r') as f:
+                results = json.load(f)
+        except OSError as e:
+            print('Can\'t read tmp file {} | '.format(file_path) + str(e))
+            sys.exit(CRITICAL)
 
         # Cleanup - remove older than 10 minutes
         results = {key: val for key, val in results.items() if float(key) >= ts_past}
-
     else:
         results = {}
 
@@ -88,11 +90,11 @@ def read_historical_results():
 def write_results_to_file(results):
     try:
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'w') as f:
+            json.dump(results, f)
     except OSError as e:
-        print("Can't create tmp dir\n" + str(e))
+        print('Can\'t create tmp file {} | '.format(file_path) + str(e))
         sys.exit(CRITICAL)
-    with open(file_path, 'w') as f:
-        json.dump(results, f)
 
 
 def get_procstat_now():
@@ -161,7 +163,7 @@ def get_cpu_stats():
 
 # Build the status message (service output message) and set the exit code based on the average value from data
 def check_status(avg):
-    message = 'Average CPU Load in last {} minutes: {}'.format(time_window_minutes, avg)
+    message = 'Average CPU Load in last {} seconds: {:.1f}%'.format(time_window_seconds, avg)
 
     if avg > crit:
         message = 'CRITICAL - ' + message
@@ -178,7 +180,7 @@ def check_status(avg):
 
 # define command line options and validate data.  Show usage or provide info on required options
 def command_line_validate(argv):
-    global warn, crit, time_window_minutes, file_path
+    global warn, crit, time_window_seconds, file_path
 
     try:
         opts, args = getopt.getopt(argv, 'w:c:t:f:V',
@@ -204,7 +206,7 @@ def command_line_validate(argv):
 
             elif opt in ('-t', '--time'):
                 try:
-                    time_window_minutes = int(arg)
+                    time_window_seconds = int(arg)
                 except:
                     print('***time window value must be an integer***')
 
@@ -258,4 +260,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        # General exception handling (so the error message is displayed in Nagios)
+        print('Script error | ' + str(e), end=" ")
+        sys.exit(CRITICAL)
