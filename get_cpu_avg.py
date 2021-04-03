@@ -69,7 +69,7 @@ timestamp = datetime.timestamp(now)
 
 
 def read_historical_results():
-    # 10 minutes ago
+    # x minutes ago
     ts_past = datetime.timestamp(now - timedelta(minutes=time_window_minutes))
     # Read the file
     if os.path.exists(file_path):
@@ -82,7 +82,6 @@ def read_historical_results():
     else:
         results = {}
 
-    # print('Last 10 minutes: ', ', '.join('{0:.2f}%'.format(x) for x in results.values()) or '(no data)')
     return results
 
 
@@ -164,10 +163,10 @@ def get_cpu_stats():
 def check_status(avg):
     message = 'Average CPU Load in last {} minutes: {}'.format(time_window_minutes, avg)
 
-    if avg >= crit:
+    if avg > crit:
         message = 'CRITICAL - ' + message
         status_code = CRITICAL
-    elif avg >= warn:
+    elif avg > warn:
         message = 'WARNING - ' + message
         status_code = WARNING
     else:
